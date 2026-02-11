@@ -1,0 +1,131 @@
+# ---------- Pins ----------
+SPI_ID = 0
+SCK = 18
+MOSI = 19
+MISO = 16
+CS = 17
+RESET = 20
+DIO0 = 21
+
+# ---------- SX1276 Registers ----------
+REG_FIFO = 0x00
+REG_OP_MODE = 0x01
+REG_FIFO_ADDR_PTR = 0x0D
+REG_FIFO_RX_CURRENT_ADDR = 0x10
+REG_IRQ_FLAGS = 0x12
+REG_RX_NB_BYTES = 0x13
+REG_MODEM_CONFIG_1 = 0x1D
+REG_MODEM_CONFIG_2 = 0x1E
+REG_PAYLOAD_LENGTH = 0x22
+REG_DIO_MAPPING_1 = 0x40
+REG_FRF_MSB = 0x06
+REG_FRF_MID = 0x07
+REG_FRF_LSB = 0x08
+
+# ---------- Modes ----------
+MODE_LONG_RANGE = 0x80
+MODE_SLEEP = 0x00
+MODE_STDBY = 0x01
+MODE_RX_CONTINUOUS = 0x05
+
+# ---------- Setup SPI ----------
+spi = SPI(SPI_ID, baudrate=5_000_000, polarity=0, phase=0,
+          sck=Pin(SCK), mosi=Pin(MOSI), miso=Pin(MISO))
+
+cs = Pin(CS, Pin.OUT, value=1)
+reset = Pin(RESET, Pin.OUT, value=1)
+dio0 = Pin(DIO0, Pin.IN)
+
+# ---------- Low-level SPI ----------
+def write_reg(addr, val):
+    cs.value(0)
+    spi.write(bytearray([addr | 0x80, val]))
+    cs.value(1)
+
+def read_reg(addr):
+    cs.value(0)
+    spi.write(bytearray([addr & 0x7F]))
+    val = spi.read(1)[0]
+    cs.value(1)
+    return val
+
+# ---------- Reset ----------
+def lora_reset():
+    reset.value(0)
+    time.sleep_ms(100)
+    reset.value(1)
+    time.sleep_ms(100)
+
+# ---------- Set Frequency ----------
+def set_frequency(freq_hz):
+    # FRF = freq * (2^19) / 32e6
+    frf = int(freq_hz * 524288 / 32_000_000)
+    write_reg(REG_FRF_MSB, (frf >> 16) & 0xFF)
+    write_reg(REG_FRF_MID, (frf >> 8) & 0xFF)
+    write_reg(REG_FRF_LSB, frf & 0xFF)
+
+# ---------- Init ----------
+def lora_init():
+    lora_reset()
+
+    # Sleep, then LoRa mode
+    write_reg(REG_OP_MODE, MODE_SLEEP)
+    time.sleep_ms(10)
+    write_reg(REG_OP_MODE, MODE_SLEEP | MODE_LONG_RANGE)
+    time.sleep_ms(10)
+
+    # Standby
+    write_reg(REG_OP_MODE, MODE_STDBY | MODE_LONG_RANGE)
+
+    # Set frequency (CHANGE to 868e6 or 915e6 as needed)
+    set_frequency(915_000_000)
+
+    # Modem config: BW125kHz, CR4/5, Explicit header
+    write_reg(REG_MODEM_CONFIG_1, 0x72)
+    # SF7, CRC on
+    write_reg(REG_MODEM_CONFIG_2, 0x74)
+
+    # DIO0 = RxDone
+    write_reg(REG_DIO_MAPPING_1, 0x00)
+
+    print("LoRa init OK")
+
+# ---------- RX ----------
+def lora_rx_continuous():
+    write_reg(REG_OP_MODE, MODE_RX_CONTINUOUS | MODE_LONG_RANGE)
+
+def read_packet():
+    irq = read_reg(REG_IRQ_FLAGS)
+
+    # RxDone = bit 6
+    if irq & 0x40:
+        # Clear IRQs
+        write_reg(REG_IRQ_FLAGS, 0xFF)
+
+        fifo_addr = read_reg(REG_FIFO_RX_CURRENT_ADDR)
+        length = read_reg(REG_RX_NB_BYTES)
+
+        write_reg(REG_FIFO_ADDR_PTR, fifo_addr)
+
+        data = bytearray()
+        for _ in range(length):
+            data.append(read_reg(REG_FIFO))
+
+        return data
+
+    return None
+
+# ---------- Main ----------
+lora_init()
+lora_rx_continuous()
+
+print("Listening for packets...")
+
+while True:
+    pkt = read_packet()
+    if pkt:
+        try:
+            print("RX:", pkt.decode())
+        except:
+            print("RX raw:", pkt)
+    time.sleep_ms(100)
